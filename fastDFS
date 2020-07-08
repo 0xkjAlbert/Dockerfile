@@ -1,0 +1,33 @@
+FROM alpine:latest AS build-env
+RUN echo -e "http://mirrors.aliyun.com/alpine/v3.11/main\nhttp://mirrors.aliyun.com/alpine/v3.11/community" > /etc/apk/repositories
+RUN apk update
+RUN apk add git gcc g++ make automake autoconf libtool pcre pcre-dev zlib zlib-dev openssl-dev wget
+RUN mkdir -pv /data/dfs
+RUN mkdir -pv /usr/local/src
+RUN cd /usr/local/src && git clone https://github.com/happyfish100/libfastcommon.git --depth 1 && cd libfastcommon/ && ./make.sh && ./make.sh install
+RUN cd /usr/local/src && git clone https://github.com/happyfish100/fastdfs.git --depth 1 && cd fastdfs/ && ./make.sh && ./make.sh install
+RUN cd /usr/local/src && git clone https://github.com/happyfish100/fastdfs-nginx-module.git --depth 1
+RUN cd /usr/local/src && wget http://nginx.org/download/nginx-1.18.0.tar.gz && tar -zxvf nginx-1.18.0.tar.gz
+RUN cd /usr/local/src/nginx-1.18.0 && ./configure --add-module=/usr/local/src/fastdfs-nginx-module/src/ && make && make install
+RUN echo -e "worker_processes  1;\nevents {\n    worker_connections  1024;\n}\nhttp {\n    include       mime.types;\n    default_type  application/octet-stream;\n    sendfile        on;\n    keepalive_timeout  65;\n    server {\n        listen       8888;\n        server_name  localhost;\n        location ~/group[0-9]/ {\n                ngx_fastdfs_module;\n        }\n        error_page   500 502 503 504  /50x.html;\n        location = /50x.html {\n            root   html;\n        }\n    }\n}" >/usr/local/nginx/conf/nginx.conf
+
+FROM alpine:latest
+RUN mkdir -pv /home/yuqing/fastdfs
+COPY --from=build-env /usr/lib/libfastcommon.so /usr/lib/libfastcommon.so
+COPY --from=build-env /usr/lib64/libfastcommon.so /usr/lib64/libfastcommon.so
+COPY --from=build-env /usr/lib64/libfdfsclient.so /usr/lib64/libfdfsclient.so
+COPY --from=build-env /usr/lib/libfdfsclient.so /usr/lib/libfdfsclient.so
+COPY --from=build-env /usr/lib/libpcre.so.1 /usr/lib/libpcre.so.1
+COPY --from=build-env /usr/bin/fdfs_trackerd /usr/bin/fdfs_trackerd
+COPY --from=build-env /usr/bin/fdfs_storaged /usr/bin/fdfs_storaged
+COPY --from=build-env /usr/local/nginx /usr/local/nginx
+COPY --from=build-env /etc/fdfs /etc/fdfs
+COPY --from=build-env /etc/init.d/fdfs_storaged /etc/init.d/fdfs_storaged
+COPY --from=build-env /etc/init.d/fdfs_trackerd /etc/init.d/fdfs_trackerd
+COPY --from=build-env /etc/fdfs/tracker.conf.sample /etc/fdfs/tracker.conf
+COPY --from=build-env /etc/fdfs/storage.conf.sample /etc/fdfs/storage.conf
+COPY --from=build-env /usr/local/src/fastdfs-nginx-module/src/mod_fastdfs.conf /etc/fdfs
+COPY --from=build-env /usr/local/src/fastdfs/conf/http.conf /etc/fdfs/http.conf
+COPY --from=build-env /usr/local/src/fastdfs/conf/mime.types /etc/fdfs/mime.conf
+EXPOSE 8888 22122 23000
+ENTRYPOINT sh /etc/init.d/fdfs_trackerd start && sh /etc/init.d/fdfs_storaged start && /usr/local/nginx/sbin/nginx && tail -f /etc/fdfs/client.conf
